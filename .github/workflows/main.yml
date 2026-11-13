@@ -1,384 +1,371 @@
-from bakery import assert_equal
-from dataclasses import dataclass
-from drafter import *
+# Deploy a Drafter v2 application to GitHub Pages.
+# Based on the Drafter v2 GitHub Actions deployment model, with a small
+# course-oriented diagnostics dashboard retained from the previous workflow.
+name: Deploy main branch as website
 
-hide_debug_information()
-set_website_title("Weighted Decision Matrix Calculator")
-set_website_framed(False)
-set_site_information(author="", description="", sources=["", ""], planning=[], links=[], server=None)
+on:
+  # Keep deployment manual, matching the existing course workflow.
+  # To deploy on every push as in the Drafter v2 extension guide, also add:
+  # push:
+  #   branches: ["main"]
+  workflow_dispatch:
 
-set_website_style("terminal")
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
-@dataclass
-class Option:
-    name: str
-    scores: list[int]
-    total_score: float
-    
-@dataclass
-class Criterion:
-    name: str
-    weight: int
-    
-@dataclass
-class State:
-    message: str
-    options: list[Option]
-    criteria: list[Criterion]
-    winner: str
-    
-INTRODUCTION = """A decision matrix is a mathematical way of deciding between multiple complex options.
-                  They are often used in processes like engineering design and product development, but
-                  can be used for any complicated decision. A weighted decision matrix uses weighted
-                  criteria, where each aspect of an option has a varying importance in the final outcome,
-                  to provide a total score for each option that will help you determine the best decision
-                  to take. Click the button below to get started."""
+# Only the newest deployment should finish if two are started close together.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
-NAMING_OPTIONS = """Name all of the options that you are deciding between. Select the amount of options
-                    that you want to name (up to 5) before inputing their names."""
+env:
+  # Stay on Drafter v2 while still receiving v2 bug fixes.
+  # For semester-level reproducibility, replace this with an exact version,
+  # for example: drafter==2.0.2
+  DRAFTER_SPEC: "drafter>=2,<3"
+  DIAGNOSTIC_VENV: ".venv"
+  STUDENT_REQUIREMENTS: ".drafter-student-requirements.txt"
 
-NAMING_CRITERIA = """Name the criteria that you will use to make your decision. What qualities do you want
-                     the winning option to have? Select the amount of criteria (up to 5) before inputing
-                     their names."""
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
-WEIGHING_CRITERIA = """Select weights for your criteria. A weight represents how important the criterion is
-                       for your decision process. In this decision matrix, weights are represented by
-                       percentages of 100, so be sure to only input numbers from 1-99. Your weights should
-                       add up to 100."""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Retained for the course diagnostics/commit history below.
+          fetch-depth: 0
 
-SCORING_OPTIONS = """Now score each of your options against each criterion, on a scale of 1-10 (1 being
-                     the least aligned with the criteria and 10 being the most). Click 'Next' to score
-                     the next option."""
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
-def apply_weight(weight: int, score: int) -> float:
-    converted_weight = weight / 100
-    return score * converted_weight
+      - name: Set up Python
+        run: uv python install 3.12
 
-def calculate_option(option: Option, criteria: list[Criterion]) -> float:
-    weighted_scores = []
-    for index, criterion in enumerate(criteria):
-        weighted_scores.append(apply_weight(criterion.weight, option.scores[index]))
-        
-    total = 0.0
-    for score in weighted_scores:
-        total = total + score
-    
-    return total
+      - name: Find main Python file
+        id: main
+        shell: bash
+        run: |
+          set -euo pipefail
 
-assert_equal(calculate_option(Option("Red", [2, 3, 4, 5, 6], 0.0),
-                              [Criterion("A color", 25),
-                               Criterion("Nice", 25),
-                               Criterion("Unique", 50)]), 3.25)
+          MAIN_FILE=""
+          for candidate in main.py Main.py app.py App.py; do
+            if [[ -f "$candidate" ]]; then
+              MAIN_FILE="$candidate"
+              break
+            fi
+          done
 
-@route
-def index(state: State) -> Page:
-    return Page(state, [
-         Header("Weighted Decision Matrix Calculator"),
-         Paragraph(state.message),
-         Button("Start a New Decision Matrix", "name_options")
-         ])
+          if [[ -z "$MAIN_FILE" ]]; then
+            echo "No Drafter entry file found. Expected one of: main.py, Main.py, app.py, App.py" >&2
+            exit 1
+          fi
 
-@route
-def name_options(state: State) -> Page:
-    state.message = NAMING_OPTIONS
-    
-    textboxes = []
-    for index, option in enumerate(state.options):
-        textboxes.append("\nOption " + str(index+1) + ":")
-        textboxes.append(TextBox("option_" + str(index+1), state.options[index].name))
-        
-    content = []
-    content.append(state.message)
-    for item in textboxes:
-        content.append(item)
-    content.append("\n")
-    content.append(Button("Add Option", "add_option"))
-    content.append(Button("Next", "save_options"))
-        
-    return Page(state, content)
-                   
-@route
-def add_option(state: State) -> Page:
-    if len(state.options) >=5:
-        return name_options(state)
-    state.options.append(Option("", [0, 0, 0, 0, 0], 0.0))
-    return name_options(state)
+          echo "main_file=$MAIN_FILE" >> "$GITHUB_OUTPUT"
+          echo "Using Drafter entry file: $MAIN_FILE"
 
-@route
-def save_options(state: State, option_1: str, option_2: str, option_3: str ="", option_4: str="", option_5: str="") -> Page:
-    for index, option in enumerate(state.options):
-        if index == 0:
-            option.name = option_1
-        elif index == 1:
-            option.name = option_2
-        elif index == 2:
-            option.name = option_3
-        elif index == 3:
-            option.name = option_4
-        elif index == 4:
-            option.name = option_5
-            
-    return name_criteria(state)
+      - name: Prepare course diagnostics environment
+        shell: bash
+        run: |
+          set -euo pipefail
 
-@route
-def name_criteria(state: State) -> Page:
-    state.message = NAMING_CRITERIA
-    
-    textboxes = []
-    for index, criterion in enumerate(state.criteria):
-        textboxes.append("\nCriterion " + str(index+1) + ":")
-        textboxes.append(TextBox("criterion_" + str(index+1), state.criteria[index].name))
-        
-    content = []
-    content.append(state.message)
-    for item in textboxes:
-        content.append(item)
-    content.append("\n")
-    content.append(Button("Add Criterion", "add_criterion"))
-    content.append(Button("Next", "save_criteria"))
-    
-    return Page(state, content)
+          # Preserve student requirements, but do not allow an old Drafter
+          # pin to replace the v2 version selected by this workflow.
+          : > "$STUDENT_REQUIREMENTS"
+          if [[ -f requirements.txt ]]; then
+            grep -Eiv '^[[:space:]]*drafter(\[[^]]*\])?([[:space:]<>=!~@;]|$)' \
+              requirements.txt > "$STUDENT_REQUIREMENTS" || true
+          fi
 
-@route
-def add_criterion(state: State) -> Page:
-    if len(state.criteria) >=5:
-        return name_criteria(state)
-    state.criteria.append(Criterion("", 0))
-    return name_criteria(state)
+          uv venv "$DIAGNOSTIC_VENV" --python 3.12
 
-@route
-def save_criteria(state: State, criterion_1: str, criterion_2: str, criterion_3: str ="", criterion_4: str="", criterion_5: str="") -> Page:
-    for index, criterion in enumerate(state.criteria):
-        if index == 0:
-            criterion.name = criterion_1
-        elif index == 1:
-            criterion.name = criterion_2
-        elif index == 2:
-            criterion.name = criterion_3
-        elif index == 3:
-            criterion.name = criterion_4
-        elif index == 4:
-            criterion.name = criterion_5
-            
-    return weigh_criteria(state)
-    
-@route
-def weigh_criteria(state: State) -> Page:
-    state.message = WEIGHING_CRITERIA
-    
-    textboxes = []
-    for index, criterion in enumerate(state.criteria):
-        textboxes.append(criterion.name + ":")
-        textboxes.append(TextBox("weight_" + str(index+1), criterion.weight))
-        textboxes.append("%")
-        textboxes.append("\n")
-        
-    content = []
-    content.append(state.message)
-    content.append("\n")
-    for item in textboxes:
-        content.append(item)
-    content.append(Button("Next", "save_weights"))
-        
-    return Page(state, content)
+          # Keep the course diagnostics in one environment. In particular,
+          # analyze_drafter_site imports mypy at runtime.
+          uv pip install --python "$DIAGNOSTIC_VENV/bin/python" \
+            "$DRAFTER_SPEC" \
+            coverage \
+            pylint \
+            mypy \
+            analyze-drafter-site \
+            bakery \
+            matplotlib \
+            pillow
 
-@route
-def save_weights(state: State, weight_1: str, weight_2: str, weight_3: str="", weight_4: str="", weight_5: str="") -> Page:   
-    for index, criterion in enumerate(state.criteria):
-        if index == 0:
-            criterion.weight = int(weight_1)
-        elif index == 1:
-            criterion.weight = int(weight_2)
-        elif index == 2:
-            criterion.weight = int(weight_3)
-        elif index == 3:
-            criterion.weight = int(weight_4)
-        elif index == 4:
-            criterion.weight = int(weight_5)
+          if [[ -s "$STUDENT_REQUIREMENTS" ]]; then
+            uv pip install \
+              --python "$DIAGNOSTIC_VENV/bin/python" \
+              -r "$STUDENT_REQUIREMENTS"
 
-    return score_options(state, 0)
+            # A nested -r file could contain an old Drafter constraint.
+            # Reassert the workflow's Drafter v2 requirement afterward.
+            uv pip install \
+              --python "$DIAGNOSTIC_VENV/bin/python" \
+              "$DRAFTER_SPEC"
+          fi
 
-@route
-def score_options(state: State, options_index: int) -> Page:
-    state.message = SCORING_OPTIONS
-    
-    content = []
-    content.append(state.message)
-    content.append("\n")
-    content.append("\n")
-    content.append(bold(state.options[options_index].name))
-    for index, criterion in enumerate(state.criteria):
-        if index == 0:
-            content.append("\n"+criterion.name+" ("+str(criterion.weight)+"%) :")
-            content.append(TextBox("score_"+str(index+1),
-                                   state.options[options_index].scores[index]))
-        elif index == 1:
-            content.append("\n"+criterion.name+" ("+str(criterion.weight)+"%) :")
-            content.append(TextBox("score_"+str(index+1),
-                                   state.options[options_index].scores[index]))
-        elif index == 2:
-            content.append("\n"+criterion.name+" ("+str(criterion.weight)+"%) :")
-            content.append(TextBox("score_"+str(index+1),
-                                   state.options[options_index].scores[index]))
-        elif index == 3:
-            content.append("\n"+criterion.name+" ("+str(criterion.weight)+"%) :")
-            content.append(TextBox("score_"+str(index+1),
-                                   state.options[options_index].scores[index]))
-        elif index == 4:
-            content.append("\n"+criterion.name+" ("+str(criterion.weight)+"%) :")
-            content.append(TextBox("score_"+str(index+1),
-                                   state.options[options_index].scores[index]))
-    content.append("\n")
-    content.append(Button("Next", "save_scores"))
-    return Page(state, content)
+          # Fail early if one of the required diagnostic tools was not
+          # installed correctly.
+          "$DIAGNOSTIC_VENV/bin/python" - <<'PY'
+          import coverage
+          import mypy
+          import pylint
+          import analyze_drafter_site
 
-@route
-def save_scores(state: State, score_1: str, score_2: str, score_3: str="", score_4: str="", score_5: str="") -> Page:       
-    if state.options[0].scores[0] == 0:
-        options_index = 1
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[0].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[0].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[0].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[0].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[0].scores[4] = int(score_5)
-    elif state.options[1].scores[0] == 0 and len(state.options) == 2:
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[1].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[1].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[1].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[1].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[1].scores[4] = int(score_5)
-        return process_scores(state)
-    elif state.options[1].scores[0] == 0 and len(state.options) > 2:
-        options_index = 2
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[1].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[1].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[1].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[1].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[1].scores[4] = int(score_5)
-    elif state.options[2].scores[0] == 0 and len(state.options) == 3:
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[2].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[2].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[2].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[2].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[2].scores[4] = int(score_5)
-        return process_scores(state)
-    elif state.options[2].scores[0] == 0 and len(state.options) > 3:
-        options_index = 3
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[2].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[2].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[2].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[2].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[2].scores[4] = int(score_5)
-    elif state.options[3].scores[0] == 0 and len(state.options) == 4:
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[3].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[3].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[3].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[3].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[3].scores[4] = int(score_5)
-        return process_scores(state)
-    elif state.options[3].scores[0] == 0 and len(state.options) > 4:
-        options_index = 4
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[3].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[3].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[3].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[3].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[3].scores[4] = int(score_5)
-    elif state.options[4].scores[0] == 0 and len(state.options) == 5:
-        for index, criterion in enumerate(state.criteria):
-            if index == 0:
-                state.options[4].scores[0] = int(score_1)
-            elif index == 1:
-                state.options[4].scores[1] = int(score_2)
-            elif index == 2:
-                state.options[4].scores[2] = int(score_3)
-            elif index == 3:
-                state.options[4].scores[3] = int(score_4)
-            elif index == 4:
-                state.options[1].scores[4] = int(score_5)
-        return process_scores(state)
-    print(state.options)
-    return score_options(state, options_index)
+          print("Coverage, MyPy, PyLint, and analyze_drafter_site are importable.")
+          PY
 
-@route
-def process_scores(state: State) -> Page:
-    for option in state.options:
-        option.total_score = round(calculate_option(option, state.criteria), 2)
+      - name: Build Drafter v2 site
+        id: build_site
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    maximum = state.options[0].total_score
-    winner = state.options[0].name
-    for option in state.options:
-        if option.total_score >= maximum:
-            maximum = option.total_score
-            winner = option.name
-            
-    content = []
-    content.append("The winner is " + winner + "! Check the results for ties.")
-    content.append("\n")
-    content.append("\nResults:")
-    for option in state.options:
-        content.append("\n"+option.name+" scored "+str(option.total_score))
-    content.append("\n")
-    content.append(Button("Score Again", "reset_option_scores"))
-    content.append(Button("Start a New Decision Matrix", "reset_state"))
-    return Page(state, content)
+          MAIN_FILE="${{ steps.main.outputs.main_file }}"
+          BUILD_LOG="$RUNNER_TEMP/drafter-build.log"
 
-@route
-def reset_option_scores(state: State) -> Page:
-    for option in state.options:
-        option.scores = [0, 0, 0, 0, 0]
-    return score_options(state, 0)
+          # Drafter v2 accepts semicolon-separated --additional-paths and can
+          # copy both files and directories. Preserve the old workflow's
+          # convenient behavior of publishing the student's visible project
+          # files, while excluding build/configuration files.
+          ADDITIONAL_PATHS=()
+          shopt -s nullglob
+          for path in *; do
+            case "$path" in
+              "$MAIN_FILE"|requirements.txt|pyproject.toml|uv.lock|mypy.ini|_site|__pycache__)
+                continue
+                ;;
+            esac
+            ADDITIONAL_PATHS+=("$path")
+          done
 
-@route
-def reset_state(state: State) -> Page:
-    state = State(NAMING_OPTIONS,
-                   [Option("", [0, 0, 0, 0, 0], 0.0), Option("", [0, 0, 0, 0, 0], 0.0)],
-                   [Criterion("", 0), Criterion("", 0)],
-                   "")
-    return name_options(state)
+          # uvx gives Drafter its own disposable environment. If the student's
+          # project has requirements.txt, layer those packages into the same
+          # environment so imports needed while compiling can succeed.
+          DRAFTER_RUN=(uvx --from "$DRAFTER_SPEC")
+          if [[ -f requirements.txt ]]; then
+            # The workflow controls the Drafter major version. Ignore any
+            # Drafter pin in a legacy requirements.txt, but preserve the
+            # student's actual project dependencies.
+            FILTERED_REQUIREMENTS=".drafter-student-requirements.txt"
+            trap 'rm -f "$FILTERED_REQUIREMENTS"' EXIT
+            grep -Eiv '^[[:space:]]*drafter([[:space:]<>=!~@;]|$)' requirements.txt > "$FILTERED_REQUIREMENTS" || true
+            if [[ -s "$FILTERED_REQUIREMENTS" ]]; then
+              DRAFTER_RUN+=(--with-requirements "$FILTERED_REQUIREMENTS")
+            fi
+          fi
 
-start_server(State(INTRODUCTION,
-                   [Option("", [0, 0, 0, 0, 0], 0.0), Option("", [0, 0, 0, 0, 0], 0.0)],
-                   [Criterion("", 0), Criterion("", 0)],
-                   ""))
+          DRAFTER_RUN+=(
+            drafter "$MAIN_FILE"
+            --compile
+            --output-directory _site
+            --production
+          )
+
+          for path in "${ADDITIONAL_PATHS[@]}"; do
+            DRAFTER_RUN+=(--additional-paths "$path")
+          done
+
+          # Keep the course dashboard reachable from Drafter's generated
+          # auxiliary links without coupling the dashboard to the build itself.
+          DRAFTER_RUN+=(
+            --external-pages "dashboard/ Dashboard"
+            --external-pages "${{ github.server_url }}/${{ github.repository }} Repository"
+          )
+
+          {
+            echo "Drafter v2 deployment build"
+            echo "Repository: ${{ github.repository }}"
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "Entry file: $MAIN_FILE"
+            echo
+            printf 'Command:'
+            printf ' %q' "${DRAFTER_RUN[@]}"
+            echo
+            echo
+            "${DRAFTER_RUN[@]}"
+          } 2>&1 | tee "$BUILD_LOG"
+
+          # GitHub Pages should serve Drafter's generated static files as-is.
+          touch _site/.nojekyll
+
+          mkdir -p _site/dashboard
+          cp "$BUILD_LOG" _site/dashboard/build.log
+
+          # Drafter v2 assertions execute before start_server during compilation.
+          # Surface their SUCCESS/FAILURE lines without running the application a
+          # second time or relying on the removed v1 DRAFTER_SKIP mechanism.
+          grep -E 'SUCCESS|FAILURE' "$BUILD_LOG" > _site/dashboard/tests.txt || true
+          if [[ ! -s _site/dashboard/tests.txt ]]; then
+            echo "No Drafter assertion output was detected during compilation." > _site/dashboard/tests.txt
+          fi
+
+      - name: Run tests and output code coverage
+        id: coverage
+        shell: bash
+        env:
+          DRAFTER_SKIP: "true"
+        run: |
+          set -euo pipefail
+
+          MAIN_FILE="${{ steps.main.outputs.main_file }}"
+          mkdir -p _site/dashboard/coverage
+
+          "$DIAGNOSTIC_VENV/bin/python" -m coverage erase
+
+          "$DIAGNOSTIC_VENV/bin/python" -m coverage run "$MAIN_FILE" \
+             2>&1 | tee _site/dashboard/coverage.txt
+          
+          "$DIAGNOSTIC_VENV/bin/python" -m coverage html \
+             -d _site/dashboard/coverage \
+             2>&1 | tee -a _site/dashboard/coverage.txt
+      - name: Run linter
+        id: lint
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p _site/dashboard
+
+          shopt -s nullglob
+          PYTHON_FILES=(*.py)
+
+          if (( ${#PYTHON_FILES[@]} == 0 )); then
+            echo "No top-level Python files found." \
+              | tee _site/dashboard/lint.txt
+            exit 0
+          fi
+
+          "$DIAGNOSTIC_VENV/bin/python" -m pylint \
+            "${PYTHON_FILES[@]}" \
+            --exit-zero \
+            2>&1 | tee _site/dashboard/lint.txt
+      - name: Run type checker
+        id: typecheck
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+
+          MAIN_FILE="${{ steps.main.outputs.main_file }}"
+          MYPY_CONFIG="mypy.ini"
+
+          # Respect a student/instructor-provided config. Otherwise use the
+          # same Bakery compatibility rule as the previous workflow, without
+          # modifying the repository during the build.
+          if [[ ! -f "$MYPY_CONFIG" ]]; then
+            MYPY_CONFIG="$RUNNER_TEMP/drafter-mypy.ini"
+
+            cat > "$MYPY_CONFIG" <<'INI'
+          [mypy]
+
+          [mypy-bakery.*]
+          ignore_missing_imports = True
+          INI
+          fi
+
+          "$DIAGNOSTIC_VENV/bin/python" -m mypy \
+            --config-file "$MYPY_CONFIG" \
+            "$MAIN_FILE" \
+            2>&1 | tee _site/dashboard/type.txt
+
+      # Course-specific static analysis. This is not required by Drafter v2.
+      # It is kept because the previous workflow used it for grading support.
+      # The tool predates Drafter v2, so treat its report as advisory until its
+      # v2 compatibility has been validated for the constructs used in a course.
+      - name: Run Drafter site analysis
+        id: drafter_analysis
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          MAIN_FILE="${{ steps.main.outputs.main_file }}"
+          mkdir -p _site/dashboard/analysis
+          "$DIAGNOSTIC_VENV/bin/analyze_drafter_site" "$MAIN_FILE" \
+            --output-dir _site/dashboard/analysis \
+            --no-stdout \
+            2>&1 | tee _site/dashboard/analysis.log
+
+      - name: Record commit history
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          git log --oneline --decorate --graph --all -n 50 > _site/dashboard/commits.txt
+
+      - name: Create deployment dashboard
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from html import escape
+          from pathlib import Path
+
+          dashboard = Path("_site/dashboard")
+          dashboard.mkdir(parents=True, exist_ok=True)
+
+          build_log = dashboard / "build.log"
+          build_text = build_log.read_text(encoding="utf-8", errors="replace") if build_log.exists() else "Build log unavailable."
+
+          analysis_link = ""
+          if (dashboard / "analysis" / "analysis.html").exists():
+              analysis_link = '<li><a href="analysis/analysis.html">Drafter Site Analysis</a>: course-specific static analysis.</li>'
+          elif (dashboard / "analysis.log").exists():
+              analysis_link = '<li><a href="analysis.log">Drafter Site Analysis Log</a>: analyzer output or failure details.</li>'
+
+          html = f"""<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Deployment Dashboard</title>
+            <style>
+              body {{ max-width: 72rem; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; line-height: 1.45; }}
+              pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f5; padding: 1rem; }}
+              code {{ font-family: ui-monospace, monospace; }}
+            </style>
+          </head>
+          <body>
+            <h1>Deployment Dashboard</h1>
+            <p>This page contains course-oriented deployment diagnostics. GitHub Actions remains the authoritative deployment log.</p>
+            <h2>Quick links</h2>
+            <ul>
+              <li><a href="../">Deployed Site</a></li>
+              <li><a href="https://github.com/${{ github.repository }}">GitHub Repository</a></li>
+              <li><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">GitHub Actions Run</a></li>
+              <li><a href="tests.txt">Drafter Test Output</a></li>
+              <li><a href="coverage/index.html">Coverage Report</a></li>
+              <li><a href="lint.txt">PyLint Report</a></li>
+              <li><a href="type.txt">MyPy Report</a></li>
+              <li><a href="commits.txt">Recent Commit History</a></li>
+              {analysis_link}
+              <li><a href="build.log">Raw Build Log</a></li>
+            </ul>
+            <h2>Build log</h2>
+            <pre>{escape(build_text)}</pre>
+          </body>
+          </html>
+          """
+          (dashboard / "index.html").write_text(html, encoding="utf-8")
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@main
+        with:
+          path: ./_site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
